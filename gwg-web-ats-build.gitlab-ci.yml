@@ -1,0 +1,71 @@
+.build-gwg-web-ats:
+  stage: build
+  extends:
+    - .spot-tags
+  variables:
+    DOCKER_HOST: unix:///var/run/docker.sock
+    NODE_OPTIONS: '--max_old_space_size=4096'
+    GIT_STRATEGY: fetch
+    REDIS: 'redis-cli -h $GITLAB_REDIS_HOST -p $GITLAB_REDIS_PORT -a $GITLAB_REDIS_PASSWORD'
+    ECR_BASE_URL: 292742304593.dkr.ecr.eu-west-1.amazonaws.com/citests:gwg-web-ats
+    TAGS: $CI_COMMIT_SHORT_SHA
+    DIR: "triggy.txt CI gwg-web-ats"
+    SERVICE_NAME: gwg-web-ats
+    REPO: "gwg-web-ats"
+  script:
+    - export ECR_URL=$ECR_BASE_URL-$CI_COMMIT_SHORT_SHA
+    - export ECR_LATEST_URL=$ECR_BASE_URL-latest
+    - export TEST_TAGS=$(if [ "$CI_DEFAULT_BRANCH" == "$CI_COMMIT_REF_NAME" ]; then echo "latest"; else echo ""; fi)
+    - scripts/tests/before_build.sh "$DIR" $SERVICE_NAME "$REPO" "$TAGS" "$TEST_TAGS" "-3" && exit 0
+    - docker pull 292742304593.dkr.ecr.eu-west-1.amazonaws.com/citests:base-tests &
+    - cd $SERVICE_NAME
+    - npm config set unsafe-perm true
+    - date
+    - pwd
+    - echo -e "\n//gitlab.com/api/v4/packages/npm/:_authToken=${NPM_TOKEN}" >> .npmrc
+    - npm install --cache /opt/local-data/npm --prefer-offline --no-audit
+    - node_modules/.bin/tsc --sourceMap
+    - find . -path ./node_modules -prune -false -o -name "*.ts" -exec rm {} \;
+    - npm config set unsafe-perm false
+    - npm prune --production
+    - find . -type f -print | xargs -I {} touch -a -m -t 201512180130.09 {}
+    - date
+    - mkdir -p errorShots/html-reports
+    - DOCKER_BUILDKIT=1 docker build --cache-from $ECR_LATEST_URL -f Dockerfile -t $ECR_URL --build-arg BUILDKIT_INLINE_CACHE=1 .
+    - date
+    - docker push $ECR_URL
+    - bash -c '([ "$CI_DEFAULT_BRANCH" == "$CI_COMMIT_REF_NAME" ] && docker tag $ECR_URL $ECR_LATEST_URL && docker push $ECR_LATEST_URL) || true'
+    - cd $CI_PROJECT_DIR
+    - mkdir -p build/results
+    - export DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $ECR_URL | sed "s/.*@sha256:/sha256:/g")
+    - echo $DIGEST > build/$SERVICE_NAME.digest
+    - $CI_PROJECT_DIR/scripts/tests/after_build.sh "$REPO" "$TAGS"
+  artifacts:
+    paths:
+      - "build/*.digest"
+      - 'scripts/tests'
+      - "gradle" # for Gradle Enterprise test result upload
+
+build-gwg-web-ats:
+  extends:
+    - .master-and-merge-request
+    - .gwg-web-changes-only
+    - .except-emerg
+    - .build-gwg-web-ats
+
+build-gwg-web-ats-release:
+  variables:
+    BUILD_OPTIMISATION: "true"
+  extends:
+    - .gwg-release
+    - .except-emerg
+    - .build-gwg-web-ats
+
+gwg-web-ats-eslint:
+  stage: build
+  extends:
+    - .default-check-eslint
+    - .master-and-merge-request
+  variables:
+    DIR: gwg-web-ats
+    FILES_TO_INCLUDE: "--ext .ts,.tsx src/tests"
